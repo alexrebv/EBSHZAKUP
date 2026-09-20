@@ -1,0 +1,13 @@
+{
+  "name": "pereschet-po-razmeram",
+  "version": "1.0.0",
+  "description": "Выгрузка остатков и заказов пяти маркетплейсов в Google Таблицу",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/index.js",
+    "once": "node src/index.js --once"
+  },
+  "dependencies": { "googleapis": "^144.0.0" }
+}
