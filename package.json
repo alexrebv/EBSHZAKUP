@@ -4,11 +4,17 @@
   "description": "Выгрузка остатков и заказов пяти маркетплейсов в Google Таблицу",
   "type": "module",
   "main": "src/index.js",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node src/index.js",
     "once": "node src/index.js --once",
-    "test": "node --test"
+    "test": "node --test",
+    "свод": "node scripts/свод.mjs",
+    "проверить-ссылки": "node scripts/проверить-ссылки.mjs"
   },
-  "dependencies": { "googleapis": "^144.0.0" }
+  "dependencies": {
+    "googleapis": "^144.0.0"
+  }
 }

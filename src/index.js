@@ -9,11 +9,14 @@ const ОБРАБОТЧИКИ = {
   'FBS остатки ВБ': wbOzon.wbОстаткиFbs,
   'Заказы ВБ FBO': wbOzon.wbЗаказыFbo,
   'Заказы ВБ FBS': wbOzon.wbЗаказыFbs,
+  'FBS Возвраты': wbOzon.wbВозвраты,
 
   'FBO остатки ОЗОН': wbOzon.ozonОстаткиFbo,
   'FBS остатки ОЗОН': wbOzon.ozonОстаткиFbs,
   'Заказы ОЗОН FBO': wbOzon.ozonЗаказыFbo,
   'Заказы ОЗОН FBS': wbOzon.ozonЗаказыFbs,
+  // возвраты идут одним методом на обе схемы, поэтому задача одна
+  'Возвраты OZON FBS': wbOzon.ozonВозвраты,
 
   'FBO остатки Яндекс': ямLm.ямОстаткиFbo,
   'FBS остатки Яндекс': ямLm.ямОстаткиFbs,

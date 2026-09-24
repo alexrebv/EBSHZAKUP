@@ -1,6 +1,7 @@
 import { сохранить } from './sheets.js';
 import { требовать } from './config.js';
-import { запрос, сон, вТаблицу, число, началоПериода, период, локальныйISO } from './http.js';
+import { запрос, сон, вТаблицу, число, началоПериода, период, текстом,
+  локальныйISO } from './http.js';
 
 /* ══════════════════ ЯНДЕКС МАРКЕТ ══════════════════
  * FBY и FBS — разные кампании. Если подставить чужой номер,
@@ -64,8 +65,8 @@ async function ямОстатки(кампания, лист, сФбо) {
       }
       if (!всего) continue;
       строки.push(сФбо
-        ? [т.offerId || '-', склад.имя, доступно, заморожено, брак, всего, отметка]
-        : [т.offerId || '-', склад.имя, доступно, всего, отметка]);
+        ? [текстом(т.offerId) || '-', склад.имя, доступно, заморожено, брак, всего, отметка]
+        : [текстом(т.offerId) || '-', склад.имя, доступно, всего, отметка]);
     }
   }
   await сохранить(лист, строки);
@@ -122,7 +123,7 @@ async function ямЗаказы(кампания, лист, задача) {
   const строки = заказы
     .filter((з) => з.fake !== true)
     .flatMap((з) => (з.items || []).map((т) => [
-      String(з.id), вТаблицу(изЯМ(з.creationDate)), т.offerId || т.shopSku || '-',
+      String(з.id), вТаблицу(изЯМ(з.creationDate)), текстом(т.offerId || т.shopSku) || '-',
       число(т.count), число(т.price ?? т.buyerPrice), з.status || '-',
       з.substatus || '-', з.delivery?.region?.name || '-',
       з.delivery?.shipments?.[0]?.warehouse?.name || '-', отметка,
@@ -166,9 +167,9 @@ async function лмОстатки(лист, схема) {
       const доступно = число(с.quantity ?? с.available);
       if (!доступно) continue;
       строки.push(схема === 'fbo'
-        ? [с.supplier_sku || с.sku || '-', с.lamoda_sku || с.sku || '-',
+        ? [текстом(с.supplier_sku || с.sku) || '-', текстом(с.lamoda_sku || с.sku) || '-',
           с.warehouse || 'Склад Lamoda', доступно, число(с.reserved), отметка]
-        : [с.supplier_sku || с.sku || '-', с.lamoda_sku || с.sku || '-',
+        : [текстом(с.supplier_sku || с.sku) || '-', текстом(с.lamoda_sku || с.sku) || '-',
           с.warehouse || 'Склад продавца', доступно, отметка]);
     }
     if (пачка.length < 500) break;
@@ -205,7 +206,7 @@ async function лмЗаказы(лист, схема, задача) {
   const отметка = вТаблицу(new Date());
   const строки = заказы.flatMap((з) => (з.items || [з]).map((т) => [
     String(з.order_id || з.id || ''), вТаблицу(з.created_at || з.order_date),
-    т.supplier_sku || т.sku || '-', т.lamoda_sku || т.sku || '-',
+    текстом(т.supplier_sku || т.sku) || '-', текстом(т.lamoda_sku || т.sku) || '-',
     число(т.quantity ?? 1), число(т.price), з.status || '-',
     з.delivery?.region || з.region || '-', отметка,
   ]));
