@@ -20,11 +20,11 @@
 | `WB_МАРКЕТ` | `https://marketplace-api.wildberries.ru` | нет | `wb-ozon.js:20` |
 | `WB_КОНТЕНТ` | `https://content-api.wildberries.ru` | `WB_CONTENT_URL` | `wb-ozon.js:21` |
 | `OZ` | `https://api-seller.ozon.ru` | `OZON_API_URL` | `wb-ozon.js:356` |
-| `ЯМ` | `https://api.partner.market.yandex.ru` | нет | `yandex-lamoda.js:10` |
-| `LM_RPC` | `https://api-seller.lamoda.ru/rpc` | нет | `yandex-lamoda.js:145` |
-| `LM_B2B` | `https://b2b-api.lamoda.ru` | нет | `yandex-lamoda.js:146` |
+| `ЯМ` | `https://api.partner.market.yandex.ru` | `YM_API_URL` | `yandex-lamoda.js:12` |
+| `LM_RPC` | `https://api-seller.lamoda.ru/rpc` | нет | `yandex-lamoda.js:196` |
+| `LM_B2B` | `https://b2b-api.lamoda.ru` | нет | `yandex-lamoda.js:197` |
 
-Три адреса вынесены в окружение **только ради проб**: повадки методов — пределы
+Четыре адреса вынесены в окружение **только ради проб**: повадки методов — пределы
 периода, пагинацию, лимиты — на живом API не проверить. В бою их не задают.
 
 Функция `подставной(у)` (`wb-ozon.js:16`) узнаёт подставной адрес по
@@ -71,8 +71,8 @@
 
 | Метод | Задача | Строка |
 |---|---|---|
-| `POST /campaigns/{кампания}/offers/stocks` | остатки FBO и FBS | `yandex-lamoda.js:42` |
-| `GET /campaigns/{кампания}/orders?fromDate=…&toDate=…` | заказы | `yandex-lamoda.js:104` |
+| `POST /campaigns/{кампания}/offers/stocks` | остатки FBO и FBS | `yandex-lamoda.js:86` |
+| `GET /campaigns/{кампания}/orders?fromDate=…&toDate=…` | заказы | `yandex-lamoda.js:155` |
 
 Заголовок: `Api-Key`. Кампании FBY и FBS — **разные номера**.
 
@@ -80,8 +80,8 @@
 
 | Метод | Задача | Строка |
 |---|---|---|
-| `POST /rpc` → `getStocks` | остатки FBO и FBS | `yandex-lamoda.js:164` |
-| `GET /v1/orders?page=…&created_from=…&fulfillment_type=…` | заказы | `yandex-lamoda.js:197` |
+| `POST /rpc` → `getStocks` | остатки FBO и FBS | `yandex-lamoda.js:215` |
+| `GET /v1/orders?page=…&created_from=…&fulfillment_type=…` | заказы | `yandex-lamoda.js:248` |
 
 Заголовок обоих: `Authorization: Bearer <токен>`, но **токены разные**.
 
@@ -107,6 +107,7 @@
 | `OZON_API_URL` | нет | **только для проб** |
 | `WB_ANALYTICS_URL` | нет | **только для проб** |
 | `WB_CONTENT_URL` | нет | **только для проб** |
+| `YM_API_URL` | нет | **только для проб** |
 
 Ключи проверяются лениво: `требовать(...)` роняет **ту задачу**, которой ключа
 не хватило, а не весь сервис. Остальные задачи продолжают работать.
@@ -256,6 +257,7 @@
 | ответ без `postings` | `wb-ozon.js:455` | **ошибка**, а не «конец окна» |
 | короткая страница при `has_next: true` | `wb-ozon.js:515` | окно **не** закрываем: метод вправе недолить страницу |
 | ответ без `returns` | `wb-ozon.js:636` | **ошибка**, а не «возвратов нет» |
+| ответ без `warehouses` | `yandex-lamoda.js:88` | **ошибка**, а не «складов нет» |
 | ответ без `report` | `wb-ozon.js:252` | **ошибка**, а не «возвратов нет» |
 | курсор не двигает выборку | `wb-ozon.js:657` | **ошибка**, а не бесконечный круг |
 
