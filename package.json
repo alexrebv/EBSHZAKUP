@@ -12,7 +12,8 @@
     "once": "node src/index.js --once",
     "test": "node --test",
     "свод": "node scripts/свод.mjs",
-    "проверить-ссылки": "node scripts/проверить-ссылки.mjs"
+    "проверить-ссылки": "node scripts/проверить-ссылки.mjs",
+    "диагностика": "node scripts/диагностика.mjs"
   },
   "dependencies": {
     "googleapis": "^144.0.0"
