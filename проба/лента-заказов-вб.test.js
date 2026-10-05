@@ -45,6 +45,7 @@ function поддельныйВБ({
   валюта = 'RUB', безСнимка = false, безЗаказов = false,
 } = {}) {
   const запросы = [];
+  const попытки = { n: 0 };     // считает и отвергнутые: запросы их не видят
   const сервер = http.createServer((req, res) => {
     let сырое = '';
     req.on('data', (ч) => { сырое += ч; });
@@ -61,6 +62,7 @@ function поддельныйВБ({
           sizes: [{ chrtID: 1, skus: ['4680000000001'] }, { chrtID: 2, skus: ['4680000000002'] }],
         }], cursor: { total: 1 } }));
       }
+      попытки.n += 1;
       if (лимит429) {
         res.writeHead(429, { 'content-type': 'application/json' });
         return res.end(JSON.stringify({ title: 'too many requests' }));
@@ -95,7 +97,7 @@ function поддельныйВБ({
       return res.end(JSON.stringify({ data: ответ }));
     });
   });
-  return { сервер, запросы };
+  return { сервер, запросы, попытки };
 }
 
 async function собрать(задача = {}, опции = {}) {
@@ -117,7 +119,7 @@ async function собрать(задача = {}, опции = {}) {
 
 /** То же, но с отказом: нужен счёт запросов, а он виден только снаружи. */
 async function собратьСОшибкой(задача = {}, опции = {}) {
-  const { сервер, запросы } = поддельныйВБ(опции);
+  const { сервер, запросы, попытки } = поддельныйВБ(опции);
   await new Promise((r) => сервер.listen(0, '127.0.0.1', r));
   const адрес = `http://127.0.0.1:${сервер.address().port}`;
   process.env.WB_ANALYTICS_URL = адрес;
@@ -127,9 +129,9 @@ async function собратьСОшибкой(задача = {}, опции = {}
   const m = await import(`../src/wb-ozon.js?${Math.random()}`);
   try {
     await m.wbЛентаЗаказовСтроки({ глубина: 7, ...задача });
-    return { ошибка: null, запросы };
+    return { ошибка: null, запросы, попытки };
   } catch (е) {
-    return { ошибка: е, запросы };
+    return { ошибка: е, запросы, попытки };
   } finally {
     сервер.close();
   }
@@ -345,4 +347,13 @@ test('на боевом хосте пачка предельная, что бы 
     delete process.env.WB_FEED_LIMIT;
     if (былURL) process.env.WB_ANALYTICS_URL = былURL;
   }
+});
+
+test('на 429 лента повторяет один раз, а не четыре', async () => {
+  // Лимит ленты — один запрос в минуту. Повтор через двадцать одну секунду,
+  // как у остатков FBO, получил бы 429 снова и потратил попытку впустую:
+  // на боевом хосте это две минуты ожидания вместо одной
+  const { ошибка, попытки } = await собратьСОшибкой({}, { лимит429: true });
+  assert.match(ошибка?.message ?? '', /HTTP 429/);
+  assert.equal(попытки.n, 2, 'число попыток не соответствует минутному лимиту');
 });

@@ -22,7 +22,7 @@ function возврат(i, дата) {
 }
 
 /** Поддельный сервис: держит предел в 31 день и отдаёт по возврату на окно. */
-function поддельныйВБ({ предел = 31, пустойОтвет = false } = {}) {
+function поддельныйВБ({ предел = 31, пустойОтвет = false, лимит429 = false } = {}) {
   const окна = [];
   const сервер = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
@@ -35,6 +35,11 @@ function поддельныйВБ({ предел = 31, пустойОтвет = 
     }
     const от = u.searchParams.get('dateFrom');
     const до = u.searchParams.get('dateTo');
+    if (лимит429) {
+      окна.push({ от, до, отвергнуто: true });
+      res.writeHead(429, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ title: 'too many requests' }));
+    }
     const дней = Math.round((new Date(до) - new Date(от)) / сутки) + 1;
     окна.push({ от, до, дней });
     if (дней > предел) {
@@ -120,4 +125,22 @@ test('ответ без отчёта — ошибка, а не пустой ус
 test('«С даты» в будущем — понятная ошибка', async () => {
   await assert.rejects(() => собрать({ сдаты: серийно(2027, 1, 1) }),
     /позже сегодняшнего дня/);
+});
+
+test('на 429 возвраты повторяют один раз, а не четыре', async () => {
+  // Лимит метода — один запрос в минуту, как у ленты. Повтор через двадцать
+  // одну секунду, как у остатков FBO, получил бы 429 снова: на боевом хосте
+  // это две минуты ожидания вместо одной
+  const { сервер, окна } = поддельныйВБ({ лимит429: true });
+  await new Promise((r) => сервер.listen(0, '127.0.0.1', r));
+  const адрес = `http://127.0.0.1:${сервер.address().port}`;
+  process.env.WB_ANALYTICS_URL = адрес;
+  process.env.WB_CONTENT_URL = адрес;
+  try {
+    const m = await import(`../src/wb-ozon.js?${Math.random()}`);
+    await assert.rejects(() => m.wbВозвратыСтроки({ глубина: 7 }), /HTTP 429/);
+    assert.equal(окна.length, 2, 'число попыток не соответствует минутному лимиту');
+  } finally {
+    сервер.close();
+  }
 });
