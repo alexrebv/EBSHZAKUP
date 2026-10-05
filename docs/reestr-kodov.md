@@ -55,6 +55,14 @@
 `flag=0` — фильтр по `lastChangeDate`, а не по дате заказа: подхватываются и
 изменения в уже выгруженных заказах.
 
+У `order-feed` тело запроса **вложенное**, в отличие от всех остальных методов
+статистики: `selectedPeriod: { start, end }` и `pagination: { offset, limit,
+snapshotTime }`. Плоские `dateFrom`/`dateTo`/`limit`/`offset` метод отвергает —
+`400 invalid: selectedPeriod (field required)`. Поля ответа: `data.orders[]` с
+`createdAt`, `updatedAt`, `srid`, `nmId`, `chrtId`, `status`, `cancelType`,
+`warehouseName`, `destinationCity`, `destinationDistrict`, `sellerPrice`,
+`isMp`, `isB2b`; количества среди них нет.
+
 Заголовок авторизации у всех — `Authorization: <токен>`, без `Bearer`.
 
 ### Ozon

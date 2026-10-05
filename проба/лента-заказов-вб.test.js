@@ -17,14 +17,17 @@ process.env.WB_MARKET_KEY = 'test-market';
 const сутки = 24 * 3600 * 1000;
 const серийно = (г, м, д) => (Date.UTC(г, м - 1, д) - Date.UTC(1899, 11, 30)) / 86400000;
 
+/** Заказ ленты — поля ровно те, что в спецификации метода. */
 const заказ = (н, о = {}) => ({
   srid: о.srid ?? `7513123456789012${String(300 + н).slice(-3)}`,
   nmId: 200000 + н, chrtId: (н % 2) + 1,
-  date: '2026-09-10T10:00:00+03:00',
+  createdAt: '2026-09-10T10:00:00+03:00',
   updatedAt: '2026-10-01T10:00:00+03:00',
-  quantity: 1, finishedPrice: 1500,
-  status: о.status ?? 'sold', cancelType: о.cancelType,
-  warehouseName: 'Коледино', regionName: 'Москва',
+  sellerPrice: 1500,
+  status: о.status ?? 'buyout', cancelType: о.cancelType,
+  warehouseName: 'Коледино', warehouseRegion: '', isMp: false,
+  destinationCity: 'Москва', destinationDistrict: 'Центральный',
+  isB2b: false,
 });
 
 /**
@@ -32,7 +35,10 @@ const заказ = (н, о = {}) => ({
  * `страницы` — по элементу на страницу; `снимки` — что отдавать в snapshotTime
  * (по элементу на страницу); `безКарточек` — справочник отвечает отказом.
  */
-function поддельныйВБ({ страницы = [], снимки = null, безКарточек = false, лимит429 = false } = {}) {
+function поддельныйВБ({
+  страницы = [], снимки = null, безКарточек = false, лимит429 = false,
+  валюта = 'RUB', безСнимка = false,
+} = {}) {
   const запросы = [];
   const сервер = http.createServer((req, res) => {
     let сырое = '';
@@ -56,14 +62,26 @@ function поддельныйВБ({ страницы = [], снимки = null, 
       }
       const тело = JSON.parse(сырое || '{}');
       запросы.push(тело);
+      // Живой метод проверяет тело СТРОГО и на плоские поля отвечает
+      // 400 «invalid: selectedPeriod (field required)». Отдай подделка 200 на
+      // что угодно — и проба снова пропустит запрос, который API отвергает
+      const бранить = (чего) => {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          title: 'Invalid request body',
+          detail: `code=400, message=invalid: ${чего} (field required)`,
+        }));
+      };
+      if (!тело.selectedPeriod || typeof тело.selectedPeriod !== 'object') return бранить('selectedPeriod');
+      if (!тело.selectedPeriod.start) return бранить('selectedPeriod.start');
+      if (!тело.pagination || typeof тело.pagination !== 'object') return бранить('pagination');
+      if (typeof тело.pagination.offset !== 'number') return бранить('pagination.offset');
+      if (typeof тело.pagination.limit !== 'number') return бранить('pagination.limit');
       const н = запросы.length - 1;
       res.writeHead(200, { 'content-type': 'application/json' });
-      return res.end(JSON.stringify({
-        data: {
-          orders: страницы[н] || [],
-          snapshotTime: снимки ? (снимки[н] ?? снимки.at(-1)) : 'снимок-1',
-        },
-      }));
+      const ответ = { orders: страницы[н] || [], currency: валюта };
+      if (!безСнимка) ответ.snapshotTime = снимки ? (снимки[н] ?? снимки.at(-1)) : 'снимок-1';
+      return res.end(JSON.stringify({ data: ответ }));
     });
   });
   return { сервер, запросы };
@@ -109,13 +127,48 @@ test('пределы ленты соразмерны ёмкости листа',
     `предел выборки ${ПРЕДЕЛЫ_ЛЕНТЫ.пачка * ПРЕДЕЛЫ_ЛЕНТЫ.страниц} при ёмкости листа ${ПРЕДЕЛ}`);
 });
 
-test('даты уходят с явным смещением, а снимок — только со второй страницы', async () => {
+test('период и пагинация уходят вложенными, как требует метод', async () => {
+  // плоские dateFrom/dateTo/limit/offset метод отвергает целиком:
+  // «invalid: selectedPeriod (field required)»
   const { запросы } = await собрать({}, { страницы: [[заказ(1)], []] });
-  assert.match(запросы[0].dateFrom, /[+-]\d{2}:\d{2}$/, 'дата без смещения: метод будет гадать');
-  assert.match(запросы[0].dateTo, /[+-]\d{2}:\d{2}$/);
-  assert.equal(запросы[0].snapshotTime, undefined,
+  assert.match(запросы[0].selectedPeriod.start, /[+-]\d{2}:\d{2}$/,
+    'дата без смещения: метод будет гадать о часовом поясе');
+  assert.match(запросы[0].selectedPeriod.end, /[+-]\d{2}:\d{2}$/);
+  assert.equal(запросы[0].pagination.offset, 0);
+  assert.ok(запросы[0].pagination.limit > 0);
+  assert.equal(запросы[0].dateFrom, undefined, 'плоские поля метод не понимает');
+});
+
+test('снимок приходит во втором запросе, но не в первом', async () => {
+  const { запросы } = await собрать({}, { страницы: [[заказ(1)], []] });
+  assert.equal(запросы[0].pagination.snapshotTime, undefined,
     'в первом запросе снимка быть не должно — метод листал бы чужой, уже закрытый');
-  assert.equal(запросы[1].snapshotTime, 'снимок-1');
+  assert.equal(запросы[1].pagination.snapshotTime, 'снимок-1');
+});
+
+test('ответ без метки снимка останавливает выборку', async () => {
+  // без snapshotTime offset листает живые данные: период считается по времени
+  // статуса, статусы меняются на ходу — страницы разъезжаются молча
+  await assert.rejects(() => собрать({}, { страницы: [[заказ(1)], []], безСнимка: true }),
+    /без метки снимка/);
+});
+
+test('чужая валюта отчёта называется в заметках', async () => {
+  // лист сверяют с «Заказы ВБ FBO», а там рубли
+  const { заметки } = await собрать({}, { страницы: [[заказ(1)], []], валюта: 'KZT' });
+  assert.ok(заметки.some((з) => /ВАЛЮТА ОТЧЁТА KZT/.test(з)), `заметки: ${заметки.join(' | ')}`);
+});
+
+test('строка листа собирается из полей, которые метод действительно отдаёт', async () => {
+  // ровно здесь ломается перенос имён из чужой документации: на `date`,
+  // `quantity`, `finishedPrice`, `regionName` лист встал бы прочерками
+  const { строки } = await собрать({}, { страницы: [[заказ(1)], []] });
+  const [р] = строки;
+  assert.match(String(р[1]), /^10\.09\.2026/, '«Дата заказа» берётся из createdAt');
+  assert.match(String(р[2]), /^01\.10\.2026/, '«Дата статуса» берётся из updatedAt');
+  assert.equal(р[6], 1, 'в ленте один заказ — одна единица товара');
+  assert.equal(р[7], 1500, '«Цена» берётся из sellerPrice');
+  assert.equal(р[11], 'Центральный', '«Регион» берётся из destinationDistrict');
 });
 
 test('конец выборки подтверждает пустая страница, а не короткая', async () => {
@@ -165,13 +218,13 @@ test('повторяющийся srid не выглядит застрявшим
 
 test('«Тип отмены» стоит только при отмене', async () => {
   const { строки } = await собрать({}, { страницы: [[
-    заказ(1, { status: 'sold', cancelType: 'client' }),
-    заказ(2, { status: 'cancel', cancelType: 'client' }),
+    заказ(1, { status: 'buyout', cancelType: 'app' }),
+    заказ(2, { status: 'cancel', cancelType: 'app' }),
   ], []] });
-  const продан = строки.find((р) => р[8] === 'sold');
+  const продан = строки.find((р) => р[8] === 'buyout');
   const отменён = строки.find((р) => р[8] === 'cancel');
   assert.equal(продан[9], '-', 'у проданного заказа причина отмены — ложь');
-  assert.equal(отменён[9], 'client');
+  assert.equal(отменён[9], 'app');
 });
 
 test('srid уходит в лист принудительным текстом', async () => {
