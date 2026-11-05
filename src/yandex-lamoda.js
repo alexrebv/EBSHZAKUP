@@ -251,8 +251,9 @@ export function окнаЯМ(с, по) {
 
 /**
  * Склад, с которого собран заказ FBY, есть только в статистике заказов: метод
- * заказов кабинета отдаёт склад в системе магазина, а у FBY его нет. Отсюда же
- * цена за штуку — запасной вариант, если в самом заказе цены нет.
+ * заказов кабинета отдаёт склад в системе магазина, а у FBY его нет. Регион
+ * доставки FBY — тоже только здесь. Отсюда же цена за штуку — запасной вариант,
+ * если в самом заказе цены нет.
  *
  * Статистика отстаёт от заказов до сорока минут: свежий заказ сначала ляжет
  * без склада, а следующий прогон его допишет — строка в окне обновляется.
@@ -266,6 +267,9 @@ async function статистикаЗаказов(кампания, [с, по]) 
   }, 'orders');
   const карта = new Map();
   for (const з of заказы) {
+    // регион доставки у FBY-заказа есть только здесь: в заказе кабинета нет ни
+    // региона, ни адреса — на нём лист и потерял регионы за весь месяц
+    if (з.deliveryRegion?.name) карта.set(`${з.id}|регион`, з.deliveryRegion.name);
     for (const т of [...(з.items || []), ...(з.initialItems || [])]) {
       if (т.shopServiceType) continue;
       const цена = (т.prices || []).find((ц) => ц.type === 'BUYER')?.costPerItem;
@@ -285,8 +289,9 @@ function ценаЗаШтуку(т, стат) {
   return число(стат?.цена);
 }
 
-const регионЗаказа = (д = {}) => д.courier?.region?.name || д.pickup?.region?.name
-  || д.courier?.address?.city || д.pickup?.address?.city || '-';
+const регионЗаказа = (д = {}, изСтатистики = '') => д.courier?.region?.name
+  || д.pickup?.region?.name || изСтатистики || д.courier?.address?.city
+  || д.pickup?.address?.city || '-';
 
 export async function ямЗаказыСтроки(кампания, задача) {
   const { с, по } = период(задача);
@@ -339,7 +344,8 @@ export async function ямЗаказыСтроки(кампания, задач�
       return [
         String(з.orderId), вТаблицу(з.creationDate ? new Date(з.creationDate) : null),
         текстом(т.offerId) || '-', число(т.count), ценаЗаШтуку(т, с1), з.status || '-',
-        з.substatus || '-', регионЗаказа(з.delivery), имяСклада || '-', отметка,
+        з.substatus || '-', регионЗаказа(з.delivery, стат.get(`${з.orderId}|регион`)),
+        имяСклада || '-', отметка,
       ];
     }));
   const хвост = (ошибкаСтат ? `, склады не получены: ${ошибкаСтат.slice(0, 120)}` : '')
@@ -382,6 +388,12 @@ export const ПОСТАВКА_ЭТАП = {
   CANCELLATION_REQUESTED: 'запрошена отмена',
   CANCELLATION_REJECTED: 'отмена отклонена',
 };
+/**
+ * Заявка, чья дата поставки прошла больше полутора месяцев назад, уже ничего не
+ * везёт: так висят брошенные заявки, которые Маркет годами держит «утверждёнными».
+ * Считать их товар «в пути» значит недогружать склад.
+ */
+export const ПОСТАВКА_ЗАБЫТА_ДНЕЙ = 45;
 /** Подтипы, которые не везут товар: инвентаризации и пересортица. */
 const НЕ_ВЕЗЁТ = new Set(['INVENTORYING_SUPPLY', 'INVENTORYING_SUPPLY_WAREHOUSE_BASED_PER_SUPPLIER',
   'MISGRADING_SUPPLY', 'FIX_LOST_INVENTORYING', 'OPER_LOST_INVENTORYING']);
@@ -398,11 +410,15 @@ export async function ямПоставкиСтроки(кампания) {
 
   const { имена, заметка } = await названияСкладов();
   const отметка = вТаблицу(new Date());
+  const давно = Date.now() - ПОСТАВКА_ЗАБЫТА_ДНЕЙ * 24 * 3600 * 1000;
   const строки = [];
   let взято = 0;
+  let забытых = 0;
   for (const з of заявки) {
     if (!ПОСТАВКА_ЭТАП[з.status] || НЕ_ВЕЗЁТ.has(з.subtype)) continue;
     if ((з.childrenLinks || []).length) continue;
+    const когда = з.targetLocation?.requestedDate ? new Date(з.targetLocation.requestedDate) : null;
+    if (когда && когда.getTime() < давно) { забытых += 1; continue; }
     const ид = з.id?.id;
     if (!ид) continue;
     взято += 1;
@@ -426,7 +442,8 @@ export async function ямПоставкиСтроки(кампания) {
     }
     await паузаЯМ(300);
   }
-  return { строки, заявок: взято, заметка };
+  const хвост = (забытых ? `, старых заявок пропущено ${забытых}` : '') + заметка;
+  return { строки, заявок: взято, заметка: хвост };
 }
 
 export async function ямПоставкиFbo() {
