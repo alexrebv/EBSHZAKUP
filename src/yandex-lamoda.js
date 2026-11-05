@@ -6,33 +6,109 @@ import { запрос, сон, вТаблицу, число, началоПер�
 /* ══════════════════ ЯНДЕКС МАРКЕТ ══════════════════
  * FBY и FBS — разные кампании. Если подставить чужой номер,
  * метод вернёт пустой список без ошибки, и это легко не заметить.
+ *
+ * Заказы берутся методом кабинета `POST /v1/businesses/{businessId}/orders`:
+ * старый `GET /campaigns/{campaignId}/orders` объявлен устаревшим, с 18.01.2027
+ * начинает деградировать и 12.04.2027 отключается. Номер кабинета сервис
+ * узнаёт сам по номеру кампании, задавать его не обязательно.
  */
 // адрес вынесен в окружение только ради пробы, как у Ozon и WB: пересечение
 // типов остатков на живом API не проверить
 const ЯМ = process.env.YM_API_URL || 'https://api.partner.market.yandex.ru';
+const ЯМ_ПОДСТАВНОЙ = /^https?:\/\/(127\.0\.0\.1|localhost)[:/]/.test(ЯМ);
+const паузаЯМ = (мс) => сон(ЯМ_ПОДСТАВНОЙ ? 0 : мс);
 
-function ям(кампания, путь, метод = 'GET', тело = null) {
+/** Любой метод по полному пути: `/v2/warehouses`, `/v1/businesses/…/orders`. */
+function ямЗапрос(путь, метод = 'GET', тело = null) {
   const [ключ] = требовать('YM_API_KEY');
   const опции = { method: метод, headers: { 'Api-Key': ключ } };
   if (тело) {
     опции.headers['Content-Type'] = 'application/json';
     опции.body = JSON.stringify(тело);
   }
-  return запрос(`${ЯМ}/campaigns/${кампания}${путь}`, опции,
-    { имя: `ЯМ ${путь}`, пауза: 2000 });
+  // в имя запроса токен страницы не берём: он длинный и в «Результате»
+  // вытеснял сам текст ошибки
+  return запрос(`${ЯМ}${путь}`, опции,
+    { имя: `ЯМ ${путь.split('?')[0]}`, пауза: ЯМ_ПОДСТАВНОЙ ? 1 : 2000 });
 }
 
-const датаЯМ = (д) => {
-  const п = (n) => String(n).padStart(2, '0');
-  return `${п(д.getDate())}-${п(д.getMonth() + 1)}-${д.getFullYear()}`;
-};
+const ям = (кампания, путь, метод = 'GET', тело = null) =>
+  ямЗапрос(`/campaigns/${кампания}${путь}`, метод, тело);
 
-/** Яндекс отдаёт ДД-ММ-ГГГГ — конструктор Date такое читает неверно. */
-function изЯМ(строка) {
-  if (!строка) return null;
-  const м = String(строка).match(/^(\d{2})-(\d{2})-(\d{4})(?:\s+(\d{2}):(\d{2}):(\d{2}))?$/);
-  if (!м) return new Date(строка);
-  return new Date(+м[3], +м[2] - 1, +м[1], +(м[4] || 0), +(м[5] || 0), +(м[6] || 0));
+const п2 = (n) => String(n).padStart(2, '0');
+const датаISO = (д) => `${д.getFullYear()}-${п2(д.getMonth() + 1)}-${п2(д.getDate())}`;
+const полночь = (д) => new Date(д.getFullYear(), д.getMonth(), д.getDate());
+const плюсДней = (д, n) => new Date(д.getFullYear(), д.getMonth(), д.getDate() + n);
+
+/**
+ * Обход страниц курсором. Курсор, который не двигается, — это круг, и он
+ * падает, а не обрывается молча: оборванный обход записался бы успешным,
+ * а недочитанное не вернулось бы уже никогда.
+ */
+async function листать(имя, запросСтраницы, список, { страниц = 400 } = {}) {
+  const итог = [];
+  let токен = '';
+  for (let n = 0; n < страниц; n += 1) {
+    const ответ = await запросСтраницы(токен);
+    const тело = ответ.result || ответ;
+    const пачка = тело[список];
+    if (!Array.isArray(пачка)) {
+      throw new Error(`${имя}: метод ответил без списка «${список}» на странице ${n + 1}`);
+    }
+    итог.push(...пачка);
+    const след = тело.paging?.nextPageToken;
+    if (!след || !пачка.length) return итог;
+    if (след === токен) {
+      throw new Error(`${имя}: курсор страниц не двигается — выгрузка была бы неполной`);
+    }
+    токен = след;
+    await паузаЯМ(300);
+  }
+  throw new Error(`${имя}: больше ${страниц} страниц — обход остановлен, неполное не пишем`);
+}
+
+/** Номер кабинета по номеру кампании. `YM_BUSINESS_ID` — если хочется задать руками. */
+const кабинеты = new Map();
+async function кабинетЯМ(кампания) {
+  if (process.env.YM_BUSINESS_ID) return process.env.YM_BUSINESS_ID;
+  if (кабинеты.has(кампания)) return кабинеты.get(кампания);
+  const ответ = await ямЗапрос(`/v2/campaigns/${кампания}`);
+  const ид = (ответ.result || ответ).campaign?.business?.id;
+  if (!ид) {
+    throw new Error(`ЯМ: у кампании ${кампания} в ответе нет номера кабинета — задайте YM_BUSINESS_ID`);
+  }
+  кабинеты.set(кампания, String(ид));
+  return String(ид);
+}
+
+/**
+ * Склады Маркета: номер → название. Остатки FBY приходят только с номером
+ * склада, без имени, — на листе раньше так и стояло «305». Справочник меняется
+ * редко, а лимит у метода сто запросов в час, поэтому держим его шесть часов.
+ */
+const СПРАВОЧНИК_ЖИВЁТ = 6 * 3600 * 1000;
+let справочник = null;
+
+async function складыМаркета() {
+  if (справочник && Date.now() - справочник.когда < СПРАВОЧНИК_ЖИВЁТ) return справочник.карта;
+  const ответ = await ямЗапрос('/v2/warehouses');
+  const список = (ответ.result || ответ).warehouses;
+  if (!Array.isArray(список)) throw new Error('ЯМ склады: метод ответил без списка складов');
+  const карта = new Map(список.map((с) => [String(с.id), String(с.name || с.id).trim()]));
+  справочник = { карта, когда: Date.now() };
+  return карта;
+}
+
+/**
+ * Без названий складов данные всё равно нужны: остатки и заказы пишутся,
+ * а в «Результат» уходит, почему вместо названия стоит номер.
+ */
+async function названияСкладов() {
+  try {
+    return { имена: await складыМаркета(), заметка: '' };
+  } catch (е) {
+    return { имена: new Map(), заметка: `, названия складов не получены: ${е.message.slice(0, 120)}` };
+  }
 }
 
 /**
@@ -73,6 +149,16 @@ function остатокТовара(товар) {
   return { доступно, заморожено, брак: поТипу.get('DEFECT') || 0, всего: годный + прочее };
 }
 
+/** Оценка оборачиваемости Маркета: от неё зависит платное хранение FBY. */
+const ОБОРАЧИВАЕМОСТЬ = {
+  VERY_HIGH: 'очень высокая',
+  HIGH: 'высокая',
+  ALMOST_LOW: 'почти низкая',
+  LOW: 'низкая',
+  NO_SALES: 'нет продаж',
+  FREE_STORE: 'хранение бесплатно',
+};
+
 export async function ямОстаткиСтроки(кампания, сФбо) {
   const склады = new Map();
   // склад и артикул: страница, пришедшая повторно, не должна задваивать товар.
@@ -81,16 +167,19 @@ export async function ямОстаткиСтроки(кампания, сФбо)
   const виденные = new Set();
   let токен = '';
   for (let n = 0; n < 500; n += 1) {
-    const п = new URLSearchParams({ limit: '200' });
+    // больше сотни метод не отдаёт: лишнее он молча обрезает до ста
+    const п = new URLSearchParams({ limit: '100' });
     if (токен) п.set('page_token', токен);
-    const ответ = await ям(кампания, `/offers/stocks?${п}`, 'POST', {});
+    // оборачиваемость метод считает только по FBY
+    const ответ = await ям(кампания, `/offers/stocks?${п}`, 'POST',
+      сФбо ? { withTurnover: true } : {});
     const тело = ответ.result || ответ;
     if (!Array.isArray(тело.warehouses)) {
       throw new Error(`ЯМ остатки: метод ответил без списка складов на странице ${n + 1}`);
     }
     for (const с of тело.warehouses) {
       const ид = String(с.warehouseId);
-      if (!склады.has(ид)) склады.set(ид, { имя: с.name || ид, товары: [] });
+      if (!склады.has(ид)) склады.set(ид, { имя: с.name || '', товары: [] });
       for (const т of с.offers || []) {
         const ключ = `${ид}|${т.offerId}`;
         if (виденные.has(ключ)) continue;
@@ -101,27 +190,40 @@ export async function ямОстаткиСтроки(кампания, сФбо)
     const след = тело.paging?.nextPageToken;
     if (!след || след === токен) break;
     токен = след;
-    await сон(300);
+    await паузаЯМ(300);
   }
 
+  // названия нужны только складам Маркета; у FBS склад свой, и в справочнике
+  // Маркета его нет
+  const { имена, заметка } = сФбо ? await названияСкладов() : { имена: new Map(), заметка: '' };
   const отметка = вТаблицу(new Date());
   const строки = [];
-  for (const склад of склады.values()) {
+  let безИмени = 0;
+  for (const [ид, склад] of склады) {
+    const имя = склад.имя || имена.get(ид) || '';
+    if (!имя && сФбо) безИмени += 1;
     for (const т of склад.товары) {
       const { доступно, заморожено, брак, всего } = остатокТовара(т);
       if (!всего) continue;
-      строки.push(сФбо
-        ? [текстом(т.offerId) || '-', склад.имя, доступно, заморожено, брак, всего, отметка]
-        : [текстом(т.offerId) || '-', склад.имя, доступно, всего, отметка]);
+      if (!сФбо) {
+        строки.push([текстом(т.offerId) || '-', имя || ид, доступно, всего, отметка]);
+        continue;
+      }
+      const об = т.turnoverSummary || {};
+      const дней = typeof об.turnoverDays === 'number' && Number.isFinite(об.turnoverDays)
+        ? Math.round(об.turnoverDays * 10) / 10 : '';
+      строки.push([текстом(т.offerId) || '-', имя || ид, доступно, заморожено, брак, всего,
+        дней, ОБОРАЧИВАЕМОСТЬ[об.turnover] || об.turnover || '-', отметка]);
     }
   }
-  return { строки, складов: склады.size };
+  const хвост = заметка + (безИмени && !заметка ? `, складов без названия ${безИмени}` : '');
+  return { строки, складов: склады.size, заметка: хвост };
 }
 
 async function ямОстатки(кампания, лист, сФбо) {
-  const { строки, складов } = await ямОстаткиСтроки(кампания, сФбо);
+  const { строки, складов, заметка } = await ямОстаткиСтроки(кампания, сФбо);
   await сохранить(лист, строки);
-  return `складов ${складов}, строк ${строки.length}`;
+  return `складов ${складов}, строк ${строки.length}${заметка}`;
 }
 
 export const ямОстаткиFbo = () =>
@@ -130,64 +232,208 @@ export const ямОстаткиFbs = () =>
   ямОстатки(требовать('YM_CAMPAIGN_FBS')[0], 'FBS остатки Яндекс', false);
 
 /**
- * Метод заказов не принимает интервал длиннее 30 суток: на 33 днях отвечает
- * 400 «Invalid filters: interval between dates». Режем период на окна по 28 дней
- * с запасом. Заодно: заказы, доставленные или отменённые больше 30 дней назад,
- * этот метод не отдаёт вовсе — глубже месяца история отсюда не берётся.
+ * Метод заказов не принимает интервал длиннее 30 суток. Режем период на окна
+ * по 28 дней; конец окна у метода в интервал НЕ входит, поэтому окна стыкуются
+ * встык: конец одного — начало следующего, без дыр и без нахлёста.
  */
-const ШАГ_ЯМ = 28 * 24 * 3600 * 1000;
+export const ОКНО_ЯМ_ДНЕЙ = 28;
 
-async function ямЗаказы(кампания, лист, задача) {
+export function окнаЯМ(с, по) {
+  const окна = [];
+  const конец = плюсДней(полночь(по), 1);
+  for (let нач = полночь(с); нач < конец;) {
+    const кон = new Date(Math.min(плюсДней(нач, ОКНО_ЯМ_ДНЕЙ).getTime(), конец.getTime()));
+    окна.push([нач, кон]);
+    нач = кон;
+  }
+  return окна;
+}
+
+/**
+ * Склад, с которого собран заказ FBY, есть только в статистике заказов: метод
+ * заказов кабинета отдаёт склад в системе магазина, а у FBY его нет. Отсюда же
+ * цена за штуку — запасной вариант, если в самом заказе цены нет.
+ *
+ * Статистика отстаёт от заказов до сорока минут: свежий заказ сначала ляжет
+ * без склада, а следующий прогон его допишет — строка в окне обновляется.
+ */
+async function статистикаЗаказов(кампания, [с, по]) {
+  const заказы = await листать('ЯМ статистика заказов', (токен) => {
+    const п = new URLSearchParams({ limit: '200' });
+    if (токен) п.set('page_token', токен);
+    return ямЗапрос(`/v2/campaigns/${кампания}/stats/orders?${п}`, 'POST',
+      { dateFrom: датаISO(с), dateTo: датаISO(плюсДней(по, -1)) });
+  }, 'orders');
+  const карта = new Map();
+  for (const з of заказы) {
+    for (const т of [...(з.items || []), ...(з.initialItems || [])]) {
+      if (т.shopServiceType) continue;
+      const цена = (т.prices || []).find((ц) => ц.type === 'BUYER')?.costPerItem;
+      const к = `${з.id}|${т.shopSku}`;
+      if (!карта.has(к)) карта.set(к, { склад: т.warehouse || null, цена });
+      // заказ целиком: на случай, если артикул в статистике записан иначе
+      if (т.warehouse && !карта.has(`${з.id}|`)) карта.set(`${з.id}|`, { склад: т.warehouse });
+    }
+  }
+  return карта;
+}
+
+function ценаЗаШтуку(т, стат) {
+  const к = число(т.count);
+  const сумма = число(т.prices?.payment?.value) + число(т.prices?.cashback?.value);
+  if (к && сумма) return Math.round((сумма / к) * 100) / 100;
+  return число(стат?.цена);
+}
+
+const регионЗаказа = (д = {}) => д.courier?.region?.name || д.pickup?.region?.name
+  || д.courier?.address?.city || д.pickup?.address?.city || '-';
+
+export async function ямЗаказыСтроки(кампания, задача) {
   const { с, по } = период(задача);
+  const кабинет = await кабинетЯМ(кампания);
+  const окна = окнаЯМ(с, по);
   const заказы = [];
   const виденные = new Set();
-  let окон = 0;
+  const стат = new Map();
+  let ошибкаСтат = '';
 
-  for (let окноС = new Date(с); окноС.getTime() <= по.getTime();) {
-    const окноПо = new Date(Math.min(окноС.getTime() + ШАГ_ЯМ, по.getTime()));
-    окон += 1;
-    let токен = '';
-    for (let n = 0; n < 400; n += 1) {
-      const п = new URLSearchParams({
-        fromDate: датаЯМ(окноС), toDate: датаЯМ(окноПо), limit: '50',
-      });
+  for (const окно of окна) {
+    const пачка = await листать('ЯМ заказы', (токен) => {
+      const п = new URLSearchParams({ limit: '50' });
       if (токен) п.set('page_token', токен);
-      const ответ = await ям(кампания, `/orders?${п}`);
-      const тело = ответ.result || ответ;
-      const пачка = тело.orders || [];
-      for (const з of пачка) {
-        const ид = String(з.id ?? '');
-        if (ид && виденные.has(ид)) continue;
-        if (ид) виденные.add(ид);
-        заказы.push(з);
-      }
-      const след = тело.paging?.nextPageToken;
-      if (!след || след === токен || !пачка.length) break;
-      токен = след;
-      await сон(300);
+      return ямЗапрос(`/v1/businesses/${кабинет}/orders?${п}`, 'POST', {
+        campaignIds: [Number(кампания)],
+        fake: false,
+        dates: { creationDateFrom: датаISO(окно[0]), creationDateTo: датаISO(окно[1]) },
+      });
+    }, 'orders');
+    for (const з of пачка) {
+      const ид = String(з.orderId ?? '');
+      if (ид && виденные.has(ид)) continue;
+      if (ид) виденные.add(ид);
+      заказы.push(з);
     }
-    окноС = new Date(окноПо.getTime() + 24 * 3600 * 1000);
-    await сон(300);
+    // склад вторичен: без статистики заказы всё равно пишутся, а причина
+    // уходит в «Результат». Строки в окне допишутся следующим прогоном
+    if (!ошибкаСтат) {
+      try {
+        for (const [к, в] of await статистикаЗаказов(кампания, окно)) стат.set(к, в);
+      } catch (е) {
+        ошибкаСтат = е.message;
+      }
+    }
+    await паузаЯМ(300);
   }
 
+  const { имена, заметка } = ошибкаСтат ? { имена: new Map(), заметка: '' } : await названияСкладов();
   const отметка = вТаблицу(new Date());
+  let безСклада = 0;
   const строки = заказы
     .filter((з) => з.fake !== true)
-    .flatMap((з) => (з.items || []).map((т) => [
-      String(з.id), вТаблицу(изЯМ(з.creationDate)), текстом(т.offerId || т.shopSku) || '-',
-      число(т.count), число(т.price ?? т.buyerPrice), з.status || '-',
-      з.substatus || '-', з.delivery?.region?.name || '-',
-      з.delivery?.shipments?.[0]?.warehouse?.name || '-', отметка,
-    ]));
+    .flatMap((з) => (з.items || []).map((т) => {
+      const с1 = стат.get(`${з.orderId}|${т.offerId}`);
+      const склад = с1?.склад || стат.get(`${з.orderId}|`)?.склад;
+      const имяСклада = склад
+        ? (имена.get(String(склад.id)) || склад.name || String(склад.id ?? '')) : '';
+      if (!имяСклада) безСклада += 1;
+      return [
+        String(з.orderId), вТаблицу(з.creationDate ? new Date(з.creationDate) : null),
+        текстом(т.offerId) || '-', число(т.count), ценаЗаШтуку(т, с1), з.status || '-',
+        з.substatus || '-', регионЗаказа(з.delivery), имяСклада || '-', отметка,
+      ];
+    }));
+  const хвост = (ошибкаСтат ? `, склады не получены: ${ошибкаСтат.slice(0, 120)}` : '')
+    + заметка + (безСклада && !ошибкаСтат ? `, без склада ${безСклада}` : '');
+  return { строки, заказов: заказы.length, окон: окна.length, заметка: хвост };
+}
+
+async function ямЗаказы(кампания, лист, задача) {
+  const { строки, заказов, окон, заметка } = await ямЗаказыСтроки(кампания, задача);
   const итог = await сохранить(лист, строки);
-  return `заказов ${заказы.length} за окон ${окон}, строк ${строки.length}, `
-       + `новых ${итог.новых}, изменено ${итог.изменено}${итог.заметка}`;
+  return `заказов ${заказов} за окон ${окон}, строк ${строки.length}, `
+       + `новых ${итог.новых}, изменено ${итог.изменено}${итог.заметка}${заметка}`;
 }
 
 export const ямЗаказыFbo = (з) =>
   ямЗаказы(требовать('YM_CAMPAIGN_FBY')[0], 'Заказы Яндекс FBO', з);
 export const ямЗаказыFbs = (з) =>
   ямЗаказы(требовать('YM_CAMPAIGN_FBS')[0], 'Заказы Яндекс FBS', з);
+
+/**
+ * Поставки FBY, которые ещё не приняты складом: то, что уже едет или оформлено,
+ * но в остатках Маркета пока не числится. Без них лист отгрузки предлагал бы
+ * везти на склад то, что туда уже везут.
+ *
+ * Завершённые, отменённые и ошибочные заявки не берём. Родительская заявка
+ * мультипоставки дублирует свои дочерние, поэтому заявка с дочерними пропускается:
+ * товар считается по дочерним, иначе он посчитался бы дважды.
+ */
+export const ПОСТАВКА_ЭТАП = {
+  CREATED: 'оформляется',
+  VALIDATED: 'оформляется',
+  PUBLISHED: 'оформляется',
+  NEED_PREPARATION: 'оформляется',
+  ACCEPTED_BY_WAREHOUSE_SYSTEM: 'утверждена',
+  REGISTERED_IN_ELECTRONIC_QUEUE: 'в очереди',
+  ARRIVED_TO_SERVICE: 'отгружена',
+  ARRIVED_TO_XDOC_SERVICE: 'на транзитном складе',
+  SHIPPED_TO_SERVICE: 'едет на склад',
+  WAREHOUSE_HANDLING: 'приёмка',
+  CANCELLATION_REQUESTED: 'запрошена отмена',
+  CANCELLATION_REJECTED: 'отмена отклонена',
+};
+/** Подтипы, которые не везут товар: инвентаризации и пересортица. */
+const НЕ_ВЕЗЁТ = new Set(['INVENTORYING_SUPPLY', 'INVENTORYING_SUPPLY_WAREHOUSE_BASED_PER_SUPPLIER',
+  'MISGRADING_SUPPLY', 'FIX_LOST_INVENTORYING', 'OPER_LOST_INVENTORYING']);
+
+export async function ямПоставкиСтроки(кампания) {
+  const заявки = await листать('ЯМ заявки на поставку', (токен) => {
+    const п = new URLSearchParams({ limit: '100' });
+    if (токен) п.set('page_token', токен);
+    return ямЗапрос(`/v2/campaigns/${кампания}/supply-requests?${п}`, 'POST', {
+      requestTypes: ['SUPPLY'],
+      requestStatuses: Object.keys(ПОСТАВКА_ЭТАП),
+    });
+  }, 'requests');
+
+  const { имена, заметка } = await названияСкладов();
+  const отметка = вТаблицу(new Date());
+  const строки = [];
+  let взято = 0;
+  for (const з of заявки) {
+    if (!ПОСТАВКА_ЭТАП[з.status] || НЕ_ВЕЗЁТ.has(з.subtype)) continue;
+    if ((з.childrenLinks || []).length) continue;
+    const ид = з.id?.id;
+    if (!ид) continue;
+    взято += 1;
+    const товары = await листать('ЯМ товары заявки', (токен) => {
+      const п = new URLSearchParams({ limit: '500' });
+      if (токен) п.set('page_token', токен);
+      return ямЗапрос(`/v2/campaigns/${кампания}/supply-requests/items?${п}`, 'POST',
+        { requestId: ид });
+    }, 'items');
+    const куда = з.targetLocation || {};
+    const склад = имена.get(String(куда.serviceId)) || куда.name || String(куда.serviceId ?? '-');
+    for (const т of товары) {
+      const план = число(т.counters?.planCount);
+      if (!план) continue;
+      const принято = число(т.counters?.factCount);
+      строки.push([
+        String(ид), текстом(з.id?.marketplaceRequestId) || '-', ПОСТАВКА_ЭТАП[з.status],
+        з.status, склад, вТаблицу(куда.requestedDate ? new Date(куда.requestedDate) : null),
+        текстом(т.offerId) || '-', план, принято, Math.max(0, план - принято), отметка,
+      ]);
+    }
+    await паузаЯМ(300);
+  }
+  return { строки, заявок: взято, заметка };
+}
+
+export async function ямПоставкиFbo() {
+  const { строки, заявок, заметка } = await ямПоставкиСтроки(требовать('YM_CAMPAIGN_FBY')[0]);
+  await сохранить('FBO поставки Яндекс', строки);
+  return `заявок в работе ${заявок}, строк ${строки.length}${заметка}`;
+}
 
 /* ══════════════════ ЛАМОДА ══════════════════
  * Остатки и товары — Seller Partner API на JSON-RPC.
